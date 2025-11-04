@@ -112,11 +112,11 @@ async fn main() -> anyhow::Result<()> {
             let mut ready_tx = Some(ready_tx);
 
             loop {
+                if let Some(tx) = ready_tx.take() {
+                    println!("[recv] LISTENING on {}", recv_sock.local_addr().unwrap());
+                    let _ = tx.send(());
+                }
                 if let Ok((len, from)) = recv_sock.recv_from(&mut buf).await {
-                    if let Some(tx) = ready_tx.take() {
-                        println!("[recv] LISTENING on {}", recv_sock.local_addr().unwrap());
-                        let _ = tx.send(());
-                    }
                     if len > 0 {
                         println!("[{from}] {}", String::from_utf8_lossy(&buf[..len]));
                     }
