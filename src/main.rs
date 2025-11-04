@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use log::{debug, info};
 use reqwest::Client;
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
@@ -98,6 +99,8 @@ pub async fn get_peer_address(rendezvous: &Ipv4Addr, peer: &str) -> Result<Socke
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     let socket = Arc::new(register(&cli.rendezvous, &cli.name).await?);
     let peer = get_peer_address(&cli.rendezvous, &cli.peer).await?;
 
@@ -113,12 +116,17 @@ async fn main() -> anyhow::Result<()> {
 
             loop {
                 if let Some(tx) = ready_tx.take() {
-                    println!("[recv] LISTENING on {}", recv_sock.local_addr().unwrap());
+                    info!("[recv] LISTENING on {}", recv_sock.local_addr().unwrap());
                     let _ = tx.send(());
                 }
                 if let Ok((len, from)) = recv_sock.recv_from(&mut buf).await {
                     if len > 0 {
-                        println!("[{from}] {}", String::from_utf8_lossy(&buf[..len]));
+                        let message = String::from_utf8_lossy(&buf[..len]);
+                        if message == "punch" {
+                            debug!("{}", message);
+                        } else {
+                            info!("[{from}] {}", message);
+                        }
                     }
                 }
             }
@@ -126,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     ready_rx.await?;
-    println!("[main] RECV READY → STARTING PUNCH");
+    info!("[main] RECV READY → STARTING PUNCH");
 
     for _ in 0..100 {
         socket.send_to(b"punch", peer).await?;
@@ -152,6 +160,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    info!("type a message and press 'enter'");
 
     while let Some(line) = rx.recv().await {
         socket.send_to(line.as_bytes(), peer).await?;
