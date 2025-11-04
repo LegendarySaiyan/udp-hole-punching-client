@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use reqwest::Client;
 use tokio::net::UdpSocket;
+use tokio::runtime::Runtime;
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::oneshot;
@@ -98,10 +99,39 @@ pub async fn get_peer_address(rendezvous: &Ipv4Addr, peer: &str) -> Result<Socke
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let sock_pointer = Arc::new(register(&cli.rendezvous, &cli.name).await?);
+    let socket = Arc::new(register(&cli.rendezvous, &cli.name).await?);
     let peer = get_peer_address(&cli.rendezvous, &cli.peer).await?;
 
-    // === STDIN ===
+    let recv_sock = Arc::clone(&socket);
+
+    let (ready_tx, ready_rx) = oneshot::channel::<()>();
+
+    std::thread::spawn(move || {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut buf = vec![0u8; 2048];
+            println!("[recv] LISTENING on {}", recv_sock.local_addr().unwrap());
+
+            let _ = ready_tx.send(());
+
+            loop {
+                if let Ok((len, from)) = recv_sock.recv_from(&mut buf).await {
+                    if len > 0 {
+                        println!("[{from}] {}", String::from_utf8_lossy(&buf[..len]));
+                    }
+                }
+            }
+        });
+    });
+
+    ready_rx.await?;
+    println!("[main] RECV READY → STARTING PUNCH");
+
+    for _ in 0..100 {
+        socket.send_to(b"punch", peer).await?;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
     let (tx, mut rx) = unbounded_channel();
     let tx_input = tx.clone();
     std::thread::spawn(move || {
@@ -122,51 +152,10 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    println!("chat with {} — type and press Enter", peer);
-    let mut buf = vec![0u8; 2048];
-
-    // === 1. ОДИН PUNCH ===
-    let _ = sock_pointer.send_to(b"punch", peer).await;
-    println!("[punch] first punch sent — NAT open");
-
-    // === 2. RECV + SEND TASK ===
-    let chat_sock = Arc::clone(&sock_pointer);
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                res = chat_sock.recv_from(&mut buf) => {
-                    if let Ok((len, from)) = res {
-                        if len > 0 {
-                            println!("[{from}] {}", String::from_utf8_lossy(&buf[..len]));
-                        }
-                    }
-                }
-                Some(line) = rx.recv() => {
-                    if chat_sock.send_to(line.as_bytes(), peer).await.is_ok() {
-                        println!("Sent: {line}");
-                    }
-                }
-            }
-        }
-    });
-
-    // === 3. ОСТАЛЬНЫЕ PUNCH ===
-    for _ in 0..99 {
-        sock_pointer.send_to(b"punch", peer).await?;
-        tokio::time::sleep(Duration::from_millis(25)).await;
+    while let Some(line) = rx.recv().await {
+        socket.send_to(line.as_bytes(), peer).await?;
+        println!("Sent: {line}");
     }
 
-    // === KEEP-ALIVE ===
-    let keep_sock = Arc::clone(&sock_pointer);
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-            let _ = keep_sock.send_to(b"KA", peer).await;
-        }
-    });
-
-    println!("Client running. Press Ctrl+C to exit.");
-    ctrl_c().await?;
     Ok(())
 }
