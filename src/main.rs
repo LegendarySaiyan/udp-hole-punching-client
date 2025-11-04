@@ -101,20 +101,22 @@ async fn main() -> anyhow::Result<()> {
     let socket = Arc::new(register(&cli.rendezvous, &cli.name).await?);
     let peer = get_peer_address(&cli.rendezvous, &cli.peer).await?;
 
-    let recv_sock = Arc::clone(&socket);
-
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
+
+    let recv_sock = Arc::clone(&socket);
 
     std::thread::spawn(move || {
         let rt = Runtime::new().unwrap();
-        rt.block_on(async {
+        rt.block_on(async move {
             let mut buf = vec![0u8; 2048];
-            println!("[recv] LISTENING on {}", recv_sock.local_addr().unwrap());
-
-            let _ = ready_tx.send(());
+            let mut ready_tx = Some(ready_tx);
 
             loop {
                 if let Ok((len, from)) = recv_sock.recv_from(&mut buf).await {
+                    if let Some(tx) = ready_tx.take() {
+                        println!("[recv] LISTENING on {}", recv_sock.local_addr().unwrap());
+                        let _ = tx.send(());
+                    }
                     if len > 0 {
                         println!("[{from}] {}", String::from_utf8_lossy(&buf[..len]));
                     }
