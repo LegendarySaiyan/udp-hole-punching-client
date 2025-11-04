@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
     let sock_pointer = Arc::new(register(&cli.rendezvous, &cli.name).await?);
     let peer = get_peer_address(&cli.rendezvous, &cli.peer).await?;
 
+    // === STDIN ===
     let (tx, mut rx) = unbounded_channel();
     let tx_input = tx.clone();
     std::thread::spawn(move || {
@@ -121,25 +122,23 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    println!("chat with {} — type and press Enter", peer);
     let mut buf = vec![0u8; 2048];
 
-    let chat_sock = Arc::clone(&sock_pointer);
-    let (ready_tx, ready_rx) = oneshot::channel::<()>();
-    tokio::spawn(async move {
-        if let Ok((len, from)) = chat_sock.recv_from(&mut buf).await {
-            if len > 0 {
-                println!("[{from}] {}", String::from_utf8_lossy(&buf[..len]));
-            }
-        }
-        let _ = ready_tx.send(());
+    // === 1. ОДИН PUNCH ===
+    let _ = sock_pointer.send_to(b"punch", peer).await;
+    println!("[punch] first punch sent — NAT open");
 
+    // === 2. RECV + SEND TASK ===
+    let chat_sock = Arc::clone(&sock_pointer);
+    tokio::spawn(async move {
         loop {
             tokio::select! {
                 res = chat_sock.recv_from(&mut buf) => {
                     if let Ok((len, from)) = res {
-                        if len == 0 { continue; }
-                        let text = String::from_utf8_lossy(&buf[..len]);
-                        println!("[{from}] {text}");
+                        if len > 0 {
+                            println!("[{from}] {}", String::from_utf8_lossy(&buf[..len]));
+                        }
                     }
                 }
                 Some(line) = rx.recv() => {
@@ -151,17 +150,23 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    ready_rx.await?;
-    println!("PUNCH START");
-
-    let punch_sock = Arc::clone(&sock_pointer);
-    for _ in 0..100 {
-        punch_sock.send_to(b"punch", peer).await?;
+    // === 3. ОСТАЛЬНЫЕ PUNCH ===
+    for _ in 0..99 {
+        sock_pointer.send_to(b"punch", peer).await?;
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
+    // === KEEP-ALIVE ===
+    let keep_sock = Arc::clone(&sock_pointer);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            let _ = keep_sock.send_to(b"KA", peer).await;
+        }
+    });
+
     println!("Client running. Press Ctrl+C to exit.");
     ctrl_c().await?;
-    println!("Shutting down...");
     Ok(())
 }
