@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
     ready_rx.await?;
     info!("[main] RECV READY → STARTING PUNCH");
 
-    for _ in 0..100 {
+    for _ in 0..200 {
         socket.send_to(b"punch", peer).await?;
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
