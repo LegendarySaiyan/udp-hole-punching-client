@@ -7,7 +7,6 @@ use clap::Parser;
 use reqwest::Client;
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
-use tokio::signal::ctrl_c;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::oneshot;
 
@@ -154,7 +153,6 @@ async fn main() -> anyhow::Result<()> {
 
     while let Some(line) = rx.recv().await {
         socket.send_to(line.as_bytes(), peer).await?;
-        println!("Sent: {line}");
     }
 
     Ok(())
