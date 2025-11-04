@@ -8,6 +8,7 @@ use reqwest::Client;
 use tokio::net::UdpSocket;
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::oneshot;
 
 #[derive(Parser)]
 struct Cli {
@@ -120,11 +121,18 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    println!("chat with {} — type and press Enter", peer);
     let mut buf = vec![0u8; 2048];
 
     let chat_sock = Arc::clone(&sock_pointer);
+    let (ready_tx, ready_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
+        if let Ok((len, from)) = chat_sock.recv_from(&mut buf).await {
+            if len > 0 {
+                println!("[{from}] {}", String::from_utf8_lossy(&buf[..len]));
+            }
+        }
+        let _ = ready_tx.send(());
+
         loop {
             tokio::select! {
                 res = chat_sock.recv_from(&mut buf) => {
@@ -142,6 +150,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    ready_rx.await?;
+    println!("PUNCH START");
 
     let punch_sock = Arc::clone(&sock_pointer);
     for _ in 0..100 {
