@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,9 +21,8 @@ struct Cli {
 }
 
 async fn register(rendezvous: &Ipv4Addr, name: &str) -> Result<UdpSocket> {
-    let mut retries = 0;
     let max_retries = 10;
-    let mut backoff_ms = 100;
+    let backoff_ms = 200;
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
 
@@ -32,15 +31,12 @@ async fn register(rendezvous: &Ipv4Addr, name: &str) -> Result<UdpSocket> {
     packet.extend_from_slice(name.as_bytes());
     packet.push(0xFF);
 
-    while retries < max_retries {
-        socket
-            .send_to(&packet, format!("{}:4200", rendezvous))
-            .await?;
-        retries += 1;
-        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-        backoff_ms += 100;
-    }
+    let addr = SocketAddr::V4(SocketAddrV4::new(*rendezvous, 4200));
 
+    for _ in 1..=max_retries {
+        socket.send_to(&packet, addr).await?;
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+    }
     Ok(socket)
 }
 
@@ -105,12 +101,6 @@ async fn main() -> anyhow::Result<()> {
 
     let peer = get_peer_address(&cli.rendezvous, &cli.peer).await?;
 
-    let socket = Arc::clone(&sock_pointer);
-    for _ in 0..5 {
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        socket.send_to(&[0], peer).await?;
-    }
-
     {
         let socket = Arc::clone(&sock_pointer);
         for _ in 0..100 {
@@ -146,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
         let socket = Arc::clone(&sock_pointer);
         tokio::select! {
             res = socket.recv_from(&mut buf) => {
+
                 let (len, from) = res?;
                 if len == 0 { continue; }
                 match std::str::from_utf8(&buf[..len]) {
