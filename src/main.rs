@@ -1,11 +1,12 @@
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, arg};
+use clap::Parser;
 use reqwest::Client;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc::unbounded_channel;
 
 #[derive(Parser)]
 struct Cli {
@@ -47,7 +48,7 @@ pub async fn get_peer_address(rendezvous: &Ipv4Addr, peer: &str) -> Result<Socke
     let client = Client::new();
 
     let http_timeout = 10;
-    let max_retries = 3;
+    let max_retries = 5;
     let mut backoff = Duration::from_millis(400);
 
     for attempt in 1..=max_retries {
@@ -100,44 +101,62 @@ pub async fn get_peer_address(rendezvous: &Ipv4Addr, peer: &str) -> Result<Socke
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let socket = register(&cli.rendezvous, &cli.name).await?;
+    let sock_pointer = Arc::new(register(&cli.rendezvous, &cli.name).await?);
+
     let peer = get_peer_address(&cli.rendezvous, &cli.peer).await?;
 
+    let socket = Arc::clone(&sock_pointer);
     for _ in 0..5 {
         tokio::time::sleep(Duration::from_millis(600)).await;
         socket.send_to(&[0], peer).await?;
     }
 
-    let stdin = tokio::io::stdin();
-    let mut lines = BufReader::new(stdin).lines();
-    let mut buf = vec![0u8; 1024];
+    {
+        let socket = Arc::clone(&sock_pointer);
+        for _ in 0..100 {
+            socket.send_to(b"punch", peer).await?;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    let (tx, mut rx) = unbounded_channel();
+    let tx_input = tx.clone();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if std::io::stdin().read_line(&mut line).is_ok() {
+                let msg = line.trim().to_string();
+                if msg.is_empty() {
+                    continue;
+                }
+                if tx_input.send(msg).is_err() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    });
 
     println!("chat with {} — type and press Enter", peer);
+    let mut buf = vec![0u8; 2048];
 
     loop {
+        let socket = Arc::clone(&sock_pointer);
         tokio::select! {
             res = socket.recv_from(&mut buf) => {
-                            let (len, from) = res?;
-                            if len == 0 { continue; }
-                            match std::str::from_utf8(&buf[..len]) {
-                                Ok(text) => println!("[{from}] {text}"),
-                                Err(_)   => println!("[{from}] <{len} bytes>"),
-                            }
-                        }
-
-            maybe_line = lines.next_line() => {
-                match maybe_line? {
-                    Some(line) => {
-                        if !line.is_empty() {
-                            socket.send_to(line.as_bytes(), peer).await?;
-                        }
-                    }
-                    None => {
-                        break;
-                    }
+                let (len, from) = res?;
+                if len == 0 { continue; }
+                match std::str::from_utf8(&buf[..len]) {
+                    Ok(text) => println!("[{from}] {text}"),
+                    Err(_) => println!("[{from}] <{} bytes>", len),
                 }
+            }
+            Some(line) = rx.recv() => {
+                socket.send_to(line.as_bytes(), peer).await?;
+                println!("Sent: {line}");
             }
         }
     }
-    Ok(())
 }
